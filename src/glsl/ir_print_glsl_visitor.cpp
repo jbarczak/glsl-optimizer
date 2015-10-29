@@ -186,6 +186,18 @@ static void print_texlod_workarounds(int usage_bitfield, int usage_proj_bitfield
 			}
 			if (usage_proj_bitfield & mask)
 			{
+				// 2D projected read also has a vec4 UV variant
+				if (dim == GLSL_SAMPLER_DIM_2D)
+				{
+					str.asprintf_append("%s vec4 impl_%stexture2DProjLodEXT(%s sampler2D sampler, highp vec4 coord, mediump float lod)\n", precString, precName, precString);
+					str.asprintf_append("{\n");
+					str.asprintf_append("#if defined(GL_EXT_shader_texture_lod)\n");
+					str.asprintf_append("\treturn texture%sProjLodEXT(sampler, coord, lod);\n", tex_sampler_dim_name[dim]);
+					str.asprintf_append("#else\n");
+					str.asprintf_append("\treturn texture%sProj(sampler, coord, lod);\n", tex_sampler_dim_name[dim]);
+					str.asprintf_append("#endif\n");
+					str.asprintf_append("}\n\n");
+				}
 				str.asprintf_append("%s vec4 impl_%stexture%sProjLodEXT(%s sampler%s sampler, highp vec%d coord, mediump float lod)\n", precString, precName, tex_sampler_dim_name[dim], precString, tex_sampler_dim_name[dim], tex_sampler_dim_size[dim] + 1);
 				str.asprintf_append("{\n");
 				str.asprintf_append("#if defined(GL_EXT_shader_texture_lod)\n");
@@ -219,6 +231,10 @@ _mesa_print_ir_glsl(exec_list *instructions,
 		}
 		if (state->ARB_shader_texture_lod_enable)
 			str.asprintf_append ("#extension GL_ARB_shader_texture_lod : enable\n");
+		if (state->ARB_draw_instanced_enable)
+			str.asprintf_append ("#extension GL_ARB_draw_instanced : enable\n");
+		if (state->EXT_gpu_shader4_enable)
+			str.asprintf_append ("#extension GL_EXT_gpu_shader4 : enable\n");
 		if (state->EXT_shader_texture_lod_enable)
 			str.asprintf_append ("#extension GL_EXT_shader_texture_lod : enable\n");
 		if (state->OES_standard_derivatives_enable)
@@ -230,12 +246,16 @@ _mesa_print_ir_glsl(exec_list *instructions,
 		if (state->es_shader && state->language_version < 300)
 		{
 			if (state->EXT_draw_buffers_enable)
-				str.asprintf_append ("#extension GL_EXT_draw_buffers : require\n");
+				str.asprintf_append ("#extension GL_EXT_draw_buffers : enable\n");
+			if (state->EXT_draw_instanced_enable)
+				str.asprintf_append ("#extension GL_EXT_draw_instanced : enable\n");
 		}
 		if (state->EXT_shader_framebuffer_fetch_enable)
 			str.asprintf_append ("#extension GL_EXT_shader_framebuffer_fetch : enable\n");
 		if (state->ARB_shader_bit_encoding_enable)
 			str.asprintf_append("#extension GL_ARB_shader_bit_encoding : enable\n");
+		if (state->EXT_texture_array_enable)
+			str.asprintf_append ("#extension GL_EXT_texture_array : enable\n");
 	}
 	
 	// remove unused struct declarations
@@ -802,10 +822,13 @@ void ir_print_glsl_visitor::visit(ir_texture *ir)
 {
 	glsl_sampler_dim sampler_dim = (glsl_sampler_dim)ir->sampler->type->sampler_dimensionality;
 	const bool is_shadow = ir->sampler->type->sampler_shadow;
+	const bool is_array = ir->sampler->type->sampler_array;
 	const glsl_type* uv_type = ir->coordinate->type;
 	const int uv_dim = uv_type->vector_elements;
 	int sampler_uv_dim = tex_sampler_dim_size[sampler_dim];
 	if (is_shadow)
+		sampler_uv_dim += 1;
+	if (is_array)
 		sampler_uv_dim += 1;
 	const bool is_proj = (uv_dim > sampler_uv_dim);
 	const bool is_lod = (ir->op == ir_txl);
@@ -854,6 +877,9 @@ void ir_print_glsl_visitor::visit(ir_texture *ir)
         else
             buffer.asprintf_append ("texture");
     }
+
+	if (is_array && state->EXT_texture_array_enable)
+		buffer.asprintf_append ("Array");
 	
 	if (is_proj)
 		buffer.asprintf_append ("Proj");
@@ -1342,7 +1368,13 @@ void ir_print_glsl_visitor::visit(ir_constant *ir)
 			|| (state->language_version < 130))
 			buffer.asprintf_append("%u", ir->value.u[0]);
 		else
-			buffer.asprintf_append("%uu", ir->value.u[0]);
+		{
+			// Old Adreno drivers try to be smart with '0u' and treat that as 'const int'. Sigh.
+			if (ir->value.u[0] == 0)
+				buffer.asprintf_append("uint(0)");
+			else
+				buffer.asprintf_append("%uu", ir->value.u[0]);
+		}
 		return;
 	}
 
